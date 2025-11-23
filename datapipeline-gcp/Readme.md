@@ -1,171 +1,136 @@
-# CDC Hospital Admissions — Data Pipeline (GCP)
+# CDC Hospital Admissions Data Pipeline - GCP Implementation
 
-**Project**: CDC Hospital Admissions Pipeline
-**Owner**: Neeraja Y. (project: `neeraja-data-pipeline`)
-**Last updated**: 2025-11-23
+**Project**: CDC Hospital Admissions Pipeline  
+**Owner**: Neeraja Y.  
+**GCP Project**: `neeraja-data-pipeline`  
+**Last Updated**: 2025-11-23
 
 ---
 
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
-2. [Architecture](#architecture)
-3. [GCP Resources & Naming](#gcp-resources--naming)
-4. [Data Flow (End-to-end)](#data-flow-end-to-end)
-5. [Files in Repo (what to include)](#files-in-repo-what-to-include)
-6. [Detailed Step-by-step Setup & Commands](#detailed-step-by-step-setup--commands)
-
-   * A. Create / verify GCS buckets
-   * B. BigQuery: dataset & table DDL
-   * C. Dataproc PySpark job (`main.py`) — upload & run
-   * D. Cloud Composer DAG — upload & enable
-   * E. Streamlit dashboard — local test & Cloud Run deploy
-7. [Testing & Validation](#testing--validation)
-8. [Common Errors & Troubleshooting](#common-errors--troubleshooting)
-9. [Security, IAM & Permissions](#security-iam--permissions)
-10. [Cost Considerations](#cost-considerations)
-11. [Next Improvements & Ideas](#next-improvements--ideas)
-12. [Appendix — Full Code Snippets](#appendix---full-code-snippets)
+2. [Implementation Flow](#implementation-flow)
+3. [Architecture](#architecture)
+4. [Step-by-Step Implementation](#step-by-step-implementation)
+5. [Testing & Validation](#testing--validation)
+6. [GCP Resources](#gcp-resources)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Project Overview
 
-This repository documents an ETL pipeline that ingests CDC hospital admissions data (CDC API) and processes it in GCP to produce a cleaned BigQuery table used by a Streamlit dashboard.
+This project implements an end-to-end data pipeline on Google Cloud Platform (GCP) that:
 
-High-level goals:
+- **Ingests** CDC hospital admissions data from a public API
+- **Processes** raw JSON data using Dataproc (PySpark)
+- **Stores** cleaned data in BigQuery for analytics
+- **Visualizes** data through an interactive Streamlit dashboard
+- **Orchestrates** the entire pipeline using Cloud Composer (Airflow)
 
-* Periodically ingest CDC JSON data into GCS
-* Process / clean JSON via Dataproc (PySpark)
-* Store cleaned data in BigQuery table `cdc_hospital_admissions`
-* Display results interactively with Streamlit (deployed to Cloud Run)
-* Orchestrate the pipeline with Cloud Composer (Airflow)
+The pipeline follows a modern data engineering approach with containerized services, serverless processing, and automated orchestration.
 
-This README explains all components, commands, and troubleshooting steps you need to reproduce and present the project.
+---
+
+## Implementation Flow
+
+This README documents the implementation flow that was followed:
+
+1. ✅ **Ingestion using Cloud Run** - Deployed containerized ingestion service
+2. ✅ **Testing** - Verified ingestion service functionality
+3. ✅ **BigQuery Dataset Creation** - Set up dataset and table schema
+4. ✅ **Dataproc Cluster & Data Validation** - Created cluster and verified data processing
+5. ✅ **Streamlit Dashboard on Cloud Run** - Deployed and tested interactive dashboard
+6. ✅ **Cloud Composer DAG** - Created and tested complete end-to-end flow
 
 ---
 
 ## Architecture
 
-Textual architecture diagram:
-
 ```
-[CDC API] 
-    |
-    v
-[Cloud Composer DAG] (cdc-composer/cdc-dag.py)
-    | Scheduled (every 12 hours) or manual trigger
-    |
-    ├─> TASK 1: BashOperator triggers [Cloud Run Job] (cdc-ingest-job)
-    |   | Executes cdc-ingestion/main.py container
-    |   | Fetches CDC API data and uploads to GCS
-    |   v
-    |   [GCS Raw Bucket] gs://cdc-health-ingestion-bucket/raw/*.json
-    |   |
-    |   v
-    └─> TASK 2: DataprocSubmitJobOperator submits [Dataproc Job]
-        | PySpark Job (cdc-dataproc/main.py)
-        | Reads raw JSON from GCS
-        | Performs data cleaning and transformations
-        v
-        ├─> [GCS Processed] gs://.../processed/cdc_clean/ (Parquet)
-        |
-        v
-        [BigQuery Table] neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions
-            |
-            v
-        [Streamlit Dashboard] (cdc-streamlit/main.py on Cloud Run)
-            | Queries BigQuery on page load
-            v
-        [Interactive UI] Charts, filters, visualizations
+┌─────────────────┐
+│   CDC API       │
+│  (data.cdc.gov) │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────────────────────┐
+│  Cloud Composer (Airflow DAG)       │
+│  - Orchestrates entire pipeline     │
+│  - Scheduled: Every 12 hours        │
+└────────┬────────────────────────────┘
+         │
+         ├─── Task 1: Cloud Run Job (Ingestion)
+         │    │
+         │    ▼
+         │    ┌─────────────────────────────┐
+         │    │  Cloud Run Job              │
+         │    │  (cdc-ingest-job)           │
+         │    │  - Fetches CDC API data     │
+         │    │  - Uploads to GCS           │
+         │    └──────────┬──────────────────┘
+         │               │
+         │               ▼
+         │    ┌─────────────────────────────┐
+         │    │  GCS Raw Bucket             │
+         │    │  gs://.../raw/*.json        │
+         │    └──────────┬──────────────────┘
+         │               │
+         └─── Task 2: Dataproc Job (Processing)
+              │
+              ▼
+         ┌─────────────────────────────┐
+         │  Dataproc Cluster           │
+         │  (cdc-processing-cluster)   │
+         │  - PySpark ETL processing   │
+         │  - Data cleaning & transform│
+         └──────────┬──────────────────┘
+                    │
+                    ├───► GCS Processed (Parquet)
+                    │     gs://.../processed/cdc_clean/
+                    │
+                    ▼
+         ┌─────────────────────────────┐
+         │  BigQuery Table             │
+         │  cdc_hospital_admissions    │
+         └──────────┬──────────────────┘
+                    │
+                    ▼
+         ┌─────────────────────────────┐
+         │  Streamlit Dashboard        │
+         │  (Cloud Run Service)        │
+         │  - Interactive visualizations│
+         │  - Real-time data queries   │
+         └─────────────────────────────┘
 ```
-
-**Component Notes**:
-
-* **Cloud Composer DAG**: Orchestrates the entire pipeline with two sequential tasks
-* **Cloud Run Job** (Task 1): Executes ingestion container to fetch CDC API data and upload to GCS raw bucket
-* **Dataproc** (Task 2): Processes heavy-lifting transformations (data cleaning, type casting, date conversion)
-* **BigQuery**: Single source of truth for analytics-ready data
-* **Streamlit**: Queries BigQuery on every page load (dashboard shows latest data automatically)
-* **Composer**: Manages scheduling, retries, and workflow orchestration
 
 ---
 
-## GCP Resources & Naming
+## Step-by-Step Implementation
 
-Use these exact names (used in this project):
+### Step 1: Ingestion using Cloud Run
 
-* GCP Project: `neeraja-data-pipeline`
-* GCS ingestion bucket: `gs://cdc-health-ingestion-bucket`
+**Objective**: Create a containerized service to fetch CDC API data and store it in GCS.
 
-  * folders: `raw/`, `processed/`, `data-proc/` (script), `data-proc/errors/`
-* Dataproc cluster: `cdc-processing-cluster` (region `us-central1`)
-* Dataproc staging bucket: `gs://cdc-dataproc-staging` (create if not existing)
-* BigQuery dataset: `cdc_health_data`
-* BigQuery table: `cdc_hospital_admissions`
+**Implementation Details**:
+- Created `cdc-ingestion/main.py` - Python script that fetches data from CDC API
+- Created `cdc-ingestion/Dockerfile` - Containerizes the ingestion service
+- Deployed as Cloud Run Job for serverless execution
 
-  * Fully-qualified: `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`
-* Composer environment: `cdc-health-composer` (region `us-central1`)
-* Streamlit image: `gcr.io/<YOUR_PROJECT>/cdc-streamlit` (replace `<YOUR_PROJECT>`)
-* Streamlit Cloud Run service name: `cdc-streamlit`
+**Files**:
+- `cdc-ingestion/main.py` - Ingestion logic
+- `cdc-ingestion/Dockerfile` - Container definition
+- `cdc-ingestion/requirements.txt` - Dependencies
 
-> Replace `YOUR_PROJECT` in commands where required. The code samples in the Appendix use these names exactly — change only if you intentionally want different names.
-
----
-
-## Data Flow (End-to-end)
-
-1. **Orchestration**: Cloud Composer DAG (`cdc-composer/cdc-dag.py`) runs on a schedule (every 12 hours by default) or can be triggered manually. The DAG contains two sequential tasks:
-   - **Task 1 (Ingestion)**: BashOperator executes Cloud Run Job `cdc-ingest-job` which runs the ingestion container (`cdc-ingestion/main.py`). This fetches data from CDC API `https://data.cdc.gov/resource/akn2-qxic.json` and writes the JSON response to `gs://cdc-health-ingestion-bucket/raw/cdc_data_<timestamp>.json`. The CDC API returns JSON arrays, e.g., `[{...}, {...}]`.
-   - **Task 2 (Processing)**: DataprocSubmitJobOperator submits a PySpark job to Dataproc cluster after ingestion completes.
-2. **Transform**: Dataproc PySpark job (`cdc-dataproc/main.py`) reads JSON using `multiLine=True`, performs data cleaning (type casting, trimming, date conversion), writes cleaned Parquet to `gs://cdc-health-ingestion-bucket/processed/cdc_clean/` and loads directly into BigQuery.
-3. **Serve**: Streamlit dashboard (`cdc-streamlit/main.py`) reads BigQuery table on page load and visualizes results. Deploy Streamlit to Cloud Run for public access.
-4. **Monitoring**: Composer & Dataproc logs are visible through Cloud Logging and the Dataproc job console.
-
----
-
-## Files in Repo (what to include)
-
-Actual project structure:
-
-```
-/
-├─ Readme.md                    <-- this document
-├─ cdc-dataproc/
-│   └─ main.py                  <-- PySpark ETL script (upload to GCS)
-├─ cdc-composer/
-│   └─ cdc-dag.py               <-- Airflow DAG (upload to Composer dags/)
-├─ cdc-streamlit/
-│   ├─ main.py                  <-- Streamlit dashboard application
-│   ├─ requirements.txt         <-- Python dependencies
-│   └─ Dockerfile               <-- Container image for Cloud Run
-└─ cdc-ingestion/
-    ├─ main.py                  <-- Cloud Run Job container for CDC API ingestion
-    ├─ Dockerfile               <-- Container image definition
-    └─ requirements.txt         <-- Python dependencies
-```
-
-
----
-
-## Detailed Step-by-step Setup & Commands
-
-### A. Deploy Data Ingestion Component
-
-You have two options for deploying the ingestion component:
-
-#### Option 1: Cloud Run Job (Recommended - matches current code structure)
-
-**Build and push the Docker image** (PowerShell - use backtick `` ` `` for line continuation):
+**Deployment Commands**:
 
 ```powershell
+# Build and push Docker image
 cd cdc-ingestion
 gcloud builds submit --tag gcr.io/neeraja-data-pipeline/cdc-ingest-job
-```
 
-**Create Cloud Run Job** (PowerShell):
-
-```powershell
+# Create Cloud Run Job
 gcloud run jobs create cdc-ingest-job `
   --image gcr.io/neeraja-data-pipeline/cdc-ingest-job `
   --region us-central1 `
@@ -173,97 +138,60 @@ gcloud run jobs create cdc-ingest-job `
   --task-timeout 300
 ```
 
-**Execute the job manually**:
+**What it does**:
+- Fetches data from CDC API: `https://data.cdc.gov/resource/akn2-qxic.json`
+- Uploads JSON response to GCS bucket: `gs://cdc-health-ingestion-bucket/raw/cdc_data_<timestamp>.json`
+- Handles errors gracefully with proper logging
 
+---
+
+### Step 2: Testing the Ingestion Service
+
+**Objective**: Verify that the Cloud Run Job successfully fetches and stores data.
+
+**Testing Steps**:
+
+1. **Execute the job manually**:
 ```powershell
 gcloud run jobs execute cdc-ingest-job --region us-central1
 ```
 
-**Schedule with Cloud Scheduler** (PowerShell):
-
-```powershell
-# First, get your project number
-$PROJECT_NUMBER = (gcloud projects describe neeraja-data-pipeline --format="value(projectNumber)")
-
-# Create scheduler job
-gcloud scheduler jobs create http cdc-ingestion-schedule `
-  --schedule="0 */6 * * *" `
-  --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_NUMBER/jobs/cdc-ingest-job:run" `
-  --http-method=POST `
-  --oauth-service-account-email=$PROJECT_NUMBER-compute@developer.gserviceaccount.com `
-  --location=us-central1
-```
-
-#### Option 2: Cloud Function (Alternative - requires code modification)
-
-**Note**: Current `main.py` uses `run()` function. For Cloud Function, change to `ingest_cdc_data(request)`.
-
-**Deploy as Cloud Function** (PowerShell):
-
-```powershell
-gcloud functions deploy ingest_cdc_data `
-  --runtime python311 `
-  --trigger-http `
-  --allow-unauthenticated `
-  --source cdc-ingestion `
-  --entry-point ingest_cdc_data `
-  --region us-central1 `
-  --timeout 60s `
-  --memory 256MB
-```
-
-**Test the function**:
-
-```powershell
-Invoke-WebRequest -Uri "https://us-central1-neeraja-data-pipeline.cloudfunctions.net/ingest_cdc_data"
-```
-
-**Verify ingestion** (both options):
-
+2. **Verify data in GCS**:
 ```powershell
 gsutil ls gs://cdc-health-ingestion-bucket/raw/
 ```
 
-**Verify ingestion**:
-
-```bash
-gsutil ls gs://cdc-health-ingestion-bucket/raw/
+3. **Check file contents**:
+```powershell
+gsutil cat gs://cdc-health-ingestion-bucket/raw/cdc_data_*.json | head -n 50
 ```
+
+4. **Review Cloud Run logs**:
+```powershell
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=cdc-ingest-job" --limit 50
+```
+
+**Expected Results**:
+- ✅ Job executes successfully
+- ✅ JSON file appears in GCS raw bucket
+- ✅ File contains valid CDC hospital admissions data
+- ✅ Logs show successful completion
 
 ---
 
-### B. Create / verify GCS buckets
+### Step 3: Create BigQuery Dataset
 
-1. **Create main bucket** (if not created already)
+**Objective**: Set up BigQuery dataset and table schema for storing processed data.
 
-```bash
-gsutil mb -l US gs://cdc-health-ingestion-bucket
-```
+**Implementation**:
 
-2. **Create folders** (just for organization; optional)
-
-```bash
-gsutil ls gs://cdc-health-ingestion-bucket || true
-gsutil cp -r local_placeholder gs://cdc-health-ingestion-bucket/raw/
-# or create directories by creating placeholder objects:
-echo "{}" | gsutil cp - gs://cdc-health-ingestion-bucket/raw/.placeholder
-echo "{}" | gsutil cp - gs://cdc-health-ingestion-bucket/processed/.placeholder
-gsutil mb -l US gs://cdc-dataproc-staging
-```
-
-**Important**: Ensure the Dataproc cluster service account and Composer service account have read/write access to these buckets (see IAM section).
-
----
-
-### C. BigQuery: dataset & table DDL
-
-Run this in BigQuery console (SQL workspace) or via `bq`:
-
+1. **Create BigQuery Dataset**:
 ```sql
--- create dataset if not exists
 CREATE SCHEMA IF NOT EXISTS `neeraja-data-pipeline.cdc_health_data`;
+```
 
--- drop + create final table
+2. **Create Table with Schema**:
+```sql
 DROP TABLE IF EXISTS `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
 
 CREATE TABLE `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions` (
@@ -292,300 +220,385 @@ CREATE TABLE `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions` (
 );
 ```
 
+**Verification**:
+```sql
+SELECT COUNT(*) as total_records 
+FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
+```
+
 ---
 
-### D. Dataproc PySpark job (main.py)
+### Step 4: Create Dataproc Cluster and Check Data in BigQuery Table
 
-**Upload the finalized PySpark script** to GCS path:
-`gs://cdc-health-ingestion-bucket/data-proc/main.py`
+**Objective**: Set up Dataproc cluster, process raw data, and verify data appears in BigQuery.
 
-**Upload command**:
-```bash
+**Implementation Details**:
+
+1. **Create GCS Buckets** (if not exists):
+```powershell
+# Main ingestion bucket
+gsutil mb -l US gs://cdc-health-ingestion-bucket
+
+# Dataproc staging bucket
+gsutil mb -l US gs://cdc-dataproc-staging
+```
+
+2. **Upload PySpark Script to GCS**:
+```powershell
 gsutil cp cdc-dataproc/main.py gs://cdc-health-ingestion-bucket/data-proc/main.py
 ```
 
-**Key points used in the script**:
+3. **Create Dataproc Cluster**:
+```powershell
+gcloud dataproc clusters create cdc-processing-cluster `
+  --region=us-central1 `
+  --zone=us-central1-a `
+  --single-node `
+  --master-machine-type=n1-standard-4 `
+  --image-version=2.1-debian11
+```
 
-* Uses `spark.read.json(..., multiLine=True)` because CDC JSON is an array format.
-* Trims whitespace from string fields to ensure data quality.
-* Casts numeric fields to float for consistency (handles nulls gracefully).
-* Converts date strings to timestamps using `to_timestamp()` for BigQuery compatibility.
-* Writes cleaned Parquet to GCS (`processed/cdc_clean/`) for backup/archival.
-* Loads directly into BigQuery using `df.write.format("bigquery")` with `temporaryGcsBucket` option.
-* Uses indirect write method for better reliability (writes to GCS staging first, then loads to BigQuery).
-
-**Quick run (manual)**:
-
-```bash
-gcloud dataproc jobs submit pyspark gs://cdc-health-ingestion-bucket/data-proc/main.py \
-  --cluster=cdc-processing-cluster \
-  --region=us-central1 \
+4. **Submit PySpark Job**:
+```powershell
+gcloud dataproc jobs submit pyspark gs://cdc-health-ingestion-bucket/data-proc/main.py `
+  --cluster=cdc-processing-cluster `
+  --region=us-central1 `
   --jars=gs://spark-lib/bigquery/spark-bigquery-latest.jar
 ```
 
-If you prefer to avoid the connector, the script can write Parquet and then you load Parquet to BigQuery using CLI or BigQuery job.
+**What the PySpark Job Does** (`cdc-dataproc/main.py`):
+- Reads raw JSON files from GCS using `multiLine=True` (handles JSON arrays)
+- Cleans data: trims whitespace, casts numeric fields, converts dates
+- Writes processed Parquet to `gs://cdc-health-ingestion-bucket/processed/cdc_clean/`
+- Loads cleaned data directly into BigQuery table
 
----
+**Verification Steps**:
 
-### E. Cloud Composer DAG
-
-**Location**: Upload `cdc-composer/cdc-dag.py` into Composer environment `dags/` folder.
-
-**Upload command**:
-```bash
-gsutil cp cdc-composer/cdc-dag.py gs://<COMPOSER_BUCKET>/dags/cdc-dag.py
+1. **Check Dataproc Job Status**:
+```powershell
+gcloud dataproc jobs list --region=us-central1
 ```
 
-**Key DAG elements**:
+2. **Verify Processed Data in GCS**:
+```powershell
+gsutil ls gs://cdc-health-ingestion-bucket/processed/cdc_clean/
+```
 
-* DAG ID: `cdc_refresh_pipeline`
-* **Task 1**: `BashOperator` (task_id: `run_cdc_ingestion`) - Executes Cloud Run Job `cdc-ingest-job` to fetch CDC data and upload to GCS
-* **Task 2**: `DataprocSubmitJobOperator` (task_id: `run_cdc_dataproc_job`) - Submits PySpark job to Dataproc cluster `cdc-processing-cluster` (region `us-central1`) with the main python file `gs://cdc-health-ingestion-bucket/data-proc/main.py`
-* Task dependencies: Task 1 must complete before Task 2 runs (`ingest_cdc_data >> run_dataproc_job`)
-* Schedule: `0 */12 * * *` (every 12 hours)
-* DAG has `catchup=False`, `retries=1`
-* Includes BigQuery connector JAR: `gs://spark-lib/bigquery/spark-bigquery-latest.jar`
+3. **Query BigQuery Table**:
+```sql
+SELECT 
+  state, 
+  county, 
+  report_date, 
+  total_adm_all_covid_confirmed,
+  avg_percent_inpatient_beds
+FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`
+ORDER BY report_date DESC
+LIMIT 50;
+```
 
-**Trigger manually**:
-
-* Composer UI → DAGs → `cdc_refresh_pipeline` → Trigger DAG
-
-**Airflow quick check**:
-
-* If job fails, check Airflow task logs and Dataproc job page for driver output links.
+**Expected Results**:
+- ✅ Dataproc job completes successfully
+- ✅ Parquet files appear in processed GCS path
+- ✅ BigQuery table contains cleaned data
+- ✅ Data types are correct (timestamps, numeric fields)
+- ✅ No null or corrupted records
 
 ---
 
-### F. Streamlit Dashboard — Local test & Cloud Run deploy
+### Step 5: Create Streamlit Dashboard using Cloud Run and Test
 
-**Local test**:
+**Objective**: Deploy an interactive Streamlit dashboard to visualize BigQuery data.
 
-1. `cd cdc-streamlit/`
-2. `pip install -r requirements.txt`
-3. `streamlit run main.py`
-4. Verify charts at `http://localhost:8501`
-5. **Important**: Update the BigQuery query in `main.py` with your actual project and dataset:
+**Implementation Details**:
+
+1. **Update BigQuery Query in Streamlit**:
+   - Edit `cdc-streamlit/main.py`
+   - Update query to use correct project/dataset:
    ```python
    FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`
    ```
 
-**requirements.txt** (example)
-
-```
-streamlit
-pandas
-google-cloud-bigquery[pandas]
-db-dtypes
-plotly
+2. **Build Docker Image**:
+```powershell
+cd cdc-streamlit
+gcloud builds submit --tag gcr.io/neeraja-data-pipeline/cdc-streamlit
 ```
 
-**Dockerfile** (example):
-
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py .
-EXPOSE 8080
-CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0"]
+3. **Deploy to Cloud Run**:
+```powershell
+gcloud run deploy cdc-streamlit `
+  --image gcr.io/neeraja-data-pipeline/cdc-streamlit `
+  --platform managed `
+  --region us-central1 `
+  --allow-unauthenticated `
+  --port 8080
 ```
 
-**Build & Push**:
+**Dashboard Features** (`cdc-streamlit/main.py`):
+- State filter dropdown
+- Time series chart showing COVID-19 admission trends
+- Bar chart displaying inpatient bed utilization by county
+- Data table with admission level indicators
+- Real-time queries from BigQuery on page load
 
-```bash
-gcloud builds submit --tag gcr.io/neeraja-data-pipeline/cdc-streamlit ./cdc-streamlit
+**Testing Steps**:
+
+1. **Local Testing** (optional):
+```powershell
+cd cdc-streamlit
+pip install -r requirements.txt
+streamlit run main.py
+# Access at http://localhost:8501
 ```
 
-**Deploy to Cloud Run**:
+2. **Access Cloud Run Service**:
+   - Get service URL:
+   ```powershell
+   gcloud run services describe cdc-streamlit --region us-central1 --format="value(status.url)"
+   ```
+   - Open URL in browser
+   - Verify dashboard loads and displays data
 
-```bash
-gcloud run deploy cdc-streamlit \
-  --image gcr.io/neeraja-data-pipeline/cdc-streamlit \
-  --platform managed \
-  --region us-central1 \
-  --allow-unauthenticated
+3. **Test Dashboard Features**:
+   - ✅ Select different states from dropdown
+   - ✅ Verify charts update correctly
+   - ✅ Check data table displays correctly
+   - ✅ Confirm data matches BigQuery table
+
+**Expected Results**:
+- ✅ Dashboard loads successfully
+- ✅ Charts render with data
+- ✅ State filter works correctly
+- ✅ Data matches BigQuery table contents
+
+---
+
+### Step 6: Create DAG and Test Complete Flow
+
+**Objective**: Orchestrate the entire pipeline using Cloud Composer (Airflow) and test end-to-end.
+
+**Implementation Details**:
+
+1. **Create Cloud Composer Environment** (if not exists):
+```powershell
+gcloud composer environments create cdc-health-composer `
+  --location us-central1 `
+  --image-version composer-2.7.0-airflow-2.7.3
 ```
 
-> The Streamlit app queries BigQuery on page load so it will show the latest data as soon as Dataproc writes to BigQuery. Optionally add `st_autorefresh` or a refresh button.
+2. **Get Composer Bucket Name**:
+```powershell
+gcloud composer environments describe cdc-health-composer `
+  --location us-central1 `
+  --format="value(config.dagGcsPrefix)"
+```
+
+3. **Upload DAG to Composer**:
+```powershell
+gsutil cp cdc-composer/cdc-dag.py gs://<COMPOSER_BUCKET>/dags/cdc-dag.py
+```
+
+**DAG Structure** (`cdc-composer/cdc-dag.py`):
+
+- **DAG ID**: `cdc_refresh_pipeline`
+- **Schedule**: Every 12 hours (`0 */12 * * *`)
+- **Task 1**: `run_cdc_ingestion` (BashOperator)
+  - Executes Cloud Run Job `cdc-ingest-job`
+  - Fetches CDC API data and uploads to GCS
+- **Task 2**: `run_cdc_dataproc_job` (DataprocSubmitJobOperator)
+  - Submits PySpark job to Dataproc cluster
+  - Processes raw data and loads into BigQuery
+- **Dependencies**: Task 1 → Task 2 (sequential execution)
+
+**Testing Steps**:
+
+1. **Verify DAG Appears in Airflow UI**:
+   - Access Airflow UI:
+   ```powershell
+   gcloud composer environments describe cdc-health-composer `
+     --location us-central1 `
+     --format="value(config.airflowUri)"
+   ```
+   - Navigate to DAGs page
+   - Confirm `cdc_refresh_pipeline` appears
+
+2. **Trigger DAG Manually**:
+   - In Airflow UI: DAGs → `cdc_refresh_pipeline` → Trigger DAG
+   - Or via command:
+   ```powershell
+   gcloud composer environments run cdc-health-composer `
+     --location us-central1 `
+     dags trigger cdc_refresh_pipeline
+   ```
+
+3. **Monitor DAG Execution**:
+   - Watch task execution in Airflow UI
+   - Check task logs for each step
+   - Verify task dependencies (Task 1 completes before Task 2)
+
+4. **End-to-End Validation**:
+   - ✅ Task 1 (Ingestion) completes successfully
+   - ✅ New JSON file appears in GCS raw bucket
+   - ✅ Task 2 (Dataproc) starts after Task 1
+   - ✅ Dataproc job completes successfully
+   - ✅ BigQuery table is updated with new data
+   - ✅ Streamlit dashboard shows updated data
+
+5. **Verify Scheduled Runs**:
+   - Wait for scheduled execution (every 12 hours)
+   - Confirm DAG runs automatically
+   - Check historical runs in Airflow UI
+
+**Expected Results**:
+- ✅ DAG appears in Airflow UI
+- ✅ Manual trigger executes successfully
+- ✅ Both tasks complete without errors
+- ✅ Data flows: CDC API → GCS → Dataproc → BigQuery
+- ✅ Scheduled runs execute automatically
+- ✅ Complete pipeline works end-to-end
 
 ---
 
 ## Testing & Validation
 
-1. **Validate raw ingestion**
+### Complete Pipeline Validation Checklist
 
-   * Check files in GCS:
-     `gsutil ls gs://cdc-health-ingestion-bucket/raw/`
-   * Confirm first few lines:
-     `gsutil cat gs://.../raw/cdc_raw_<date>.json | head -n 50`
+- [ ] **Ingestion**: Cloud Run Job fetches data and stores in GCS
+- [ ] **Raw Data**: JSON files are valid and contain expected fields
+- [ ] **Dataproc Processing**: PySpark job processes data correctly
+- [ ] **BigQuery**: Table contains cleaned, properly typed data
+- [ ] **Streamlit**: Dashboard displays data and visualizations work
+- [ ] **DAG Orchestration**: Both tasks execute in correct order
+- [ ] **Scheduled Runs**: DAG runs automatically on schedule
+- [ ] **Error Handling**: Pipeline handles failures gracefully
 
-2. **Run Dataproc job manually**
+### Validation Queries
 
-   * Submit pyspark job and watch logs
-   * Confirm Parquet in `gs://cdc-health-ingestion-bucket/processed/cdc_clean/`
-
-3. **Validate BigQuery data**
-
-   ```sql
-   SELECT state, county, report_date, total_adm_all_covid_confirmed
-   FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`
-   ORDER BY report_date DESC
-   LIMIT 50;
-   ```
-
-4. **Validate Streamlit**
-
-   * Verify charts reflect the same top rows
-
----
-
-## Common Errors & Troubleshooting
-
-### 1. `_corrupt_record` only appears in schema
-
-**Cause**: Spark couldn't parse the JSON file (likely a JSON array vs NDJSON).
-**Fix**: Use `spark.read.json(path, multiLine=True)` for JSON arrays or ensure files are newline-delimited JSON.
-
-### 2. `PATH_ALREADY_EXISTS` on write to GCS
-
-**Cause**: Output path already exists and mode defaults to `error`.
-**Fix**: Use `.mode("overwrite")` or write to a timestamped folder.
-
-### 3. Dataproc Job "File not found: gs://.../main.py"
-
-**Cause**: The file path provided to the Dataproc job does not exist in GCS.
-**Fix**: Upload `main.py` to that exact path.
-
-### 4. Composer failing with `NotFound` cluster
-
-**Cause**: DAG references wrong cluster name or cluster was deleted.
-**Fix**: Update `cluster_name` in DAG to the actual cluster or recreate cluster.
-
-### 5. BigQuery connector errors / `ClassNotFoundException`
-
-**Cause**: Spark BigQuery connector not available to the job.
-**Fix**: Submit the job with `--jars=gs://spark-lib/bigquery/spark-bigquery-latest.jar` or include connector during cluster creation.
-
-### 6. `Please install 'db-dtypes'` when Streamlit loads BigQuery result
-
-**Cause**: `google-cloud-bigquery[pandas]` needs `db-dtypes` to convert to pandas.
-**Fix**: Add `db-dtypes` to `requirements.txt` and redeploy.
-
-### 7. Permission errors (403)
-
-**Cause**: Dataproc or Composer service account lacks Storage/BigQuery permissions.
-**Fix**: Grant appropriate IAM roles (see IAM section).
-
----
-
-## Security, IAM & Permissions (minimum)
-
-Ensure the following service accounts/roles exist:
-
-* **Dataproc cluster service account** (usually compute default or custom):
-
-  * `roles/storage.objectViewer` (read raw from GCS)
-  * `roles/storage.objectAdmin` (write processed files)
-  * `roles/bigquery.dataEditor` (write to BigQuery)
-* **Composer service account** (Airflow workers):
-
-  * `roles/dataproc.jobRunner` (submit Dataproc jobs)
-  * `roles/storage.objectViewer` / `roles/storage.objectAdmin` (GCS access)
-  * `roles/bigquery.user` (run BQ queries)
-* **Cloud Run service account** (for Streamlit if accessing BigQuery):
-
-  * `roles/bigquery.dataViewer` (read-only access to query data)
-
-* **Cloud Run Job service account** (for ingestion):
-
-  * `roles/storage.objectAdmin` (write to GCS raw bucket)
-
-Grant minimum required privileges; avoid giving overly broad roles like Owner.
-
----
-
-## Cost Considerations
-
-* **Dataproc**: charged per cluster VM runtime. Use single-node cluster or set autoscaling / idle timeout.
-* **BigQuery**: storage + query cost. Avoid repeated full-table scans; partition the table by `report_date` in future versions.
-* **Composer**: environment cost; choose small environment for experiments.
-* **Cloud Run**: pay-per-use; small for low traffic.
-
----
-
-## Next Improvements & Ideas
-
-* Partition BigQuery table by `report_date` to optimize query costs.
-* Use Delta Lake / Hive metastore if you need time-travel.
-* Add unit tests for ETL logic (PySpark local testing using small ndjson files).
-* Add more visualizations and filters in Streamlit (e.g., heatmap choropleth).
-* Implement alerting (Slack/email) on Composer task failures.
-* Add retries, SLA sensors, and monitoring dashboards.
-
----
-
-## Appendix — Full Code Snippets
-
-(Place these in `dataproc/main.py`, `composer/dags/cdc_refresh_dag.py`, and `streamlit/app.py` respectively.)
-
-### `cdc-dataproc/main.py` (final recommended)
-
-```python
-# PySpark ETL script for processing CDC hospital admissions data
-# - Uses multiLine=True to read JSON arrays from GCS
-# - Trims whitespace from string fields
-# - Casts numeric fields to float for consistency
-# - Converts report_date, week_end_date to TIMESTAMP using to_timestamp()
-# - Writes cleaned Parquet to GCS (processed/cdc_clean/)
-# - Loads directly into BigQuery using Spark BigQuery connector
-# - Uses temporaryGcsBucket for BigQuery staging
+**Check Raw Data Count**:
+```powershell
+gsutil ls gs://cdc-health-ingestion-bucket/raw/ | Measure-Object -Line
 ```
 
-### `cdc-composer/cdc-dag.py`
-
-```python
-# Cloud Composer DAG for orchestrating the CDC data pipeline
-# - DAG ID: cdc_refresh_pipeline
-# - Schedule: Every 12 hours (0 */12 * * *)
-# - Task 1: BashOperator executes Cloud Run Job (cdc-ingest-job) for data ingestion
-# - Task 2: DataprocSubmitJobOperator submits PySpark job to Dataproc cluster cdc-processing-cluster
-# - Task dependencies: Task 1 completes before Task 2 starts
-# - References main script: gs://cdc-health-ingestion-bucket/data-proc/main.py
-# - Includes BigQuery connector JAR for Spark-to-BigQuery integration
+**Check BigQuery Record Count**:
+```sql
+SELECT COUNT(*) as total_records,
+       COUNT(DISTINCT state) as unique_states,
+       MIN(report_date) as earliest_date,
+       MAX(report_date) as latest_date
+FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
 ```
 
-### `cdc-streamlit/main.py`
-
-```python
-# Streamlit dashboard application
-# Creates a BigQuery client and runs:
-# df = client.query("SELECT ... FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`").to_dataframe()
-# Then builds interactive charts and filters using Plotly.
-# Remember to update the query with your actual project and dataset names.
+**Check Data Quality**:
+```sql
+SELECT 
+  COUNT(*) as total_rows,
+  COUNT(DISTINCT state) as states,
+  COUNT(DISTINCT county) as counties,
+  SUM(CASE WHEN total_adm_all_covid_confirmed IS NULL THEN 1 ELSE 0 END) as null_admissions
+FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
 ```
-
-### `cdc-ingestion/main.py`
-
-```python
-# Cloud Run Job container for CDC API data ingestion
-# Fetches data from CDC API and uploads to GCS raw bucket
-# Deployed as Cloud Run Job (cdc-ingest-job) and triggered by Composer DAG
-# Can also be executed manually via gcloud run jobs execute command
-# Handles errors gracefully with proper logging
-```
-
-(Full code blocks are intentionally referenced here to keep README concise — include the exact validated scripts in `cdc-dataproc/main.py`, `cdc-composer/cdc-dag.py`, `cdc-streamlit/main.py`, and `cdc-ingestion/main.py` in your repo.)
 
 ---
 
-## Final notes
+## GCP Resources
 
-* Keep all environment/resource names consistent across your code and DAG.
-* Monitor the Dataproc staging bucket (`cdc-dataproc-staging`) — if it gets deleted, jobs fail silently without driver logs.
-* Ensure the BigQuery query in Streamlit (`cdc-streamlit/main.py`) is updated with your actual project and dataset names.
-* The ingestion component is deployed as a Cloud Run Job (`cdc-ingest-job`) and is triggered by the Composer DAG as the first task. It can also be executed manually via `gcloud run jobs execute` command.
-* When presenting: show one successful run (Composer DAG → Cloud Run Job → CDC API → GCS raw file → Dataproc job → BigQuery rows → Streamlit UI) and highlight logs + the DAG run history.
-* All code files include comprehensive comments explaining each major section/function for better maintainability.
+### Resource Naming Convention
 
+| Resource Type | Name | Region | Purpose |
+|--------------|------|--------|---------|
+| GCS Bucket | `cdc-health-ingestion-bucket` | US | Raw and processed data storage |
+| GCS Bucket | `cdc-dataproc-staging` | US | Dataproc staging and temp files |
+| Cloud Run Job | `cdc-ingest-job` | us-central1 | Data ingestion service |
+| Cloud Run Service | `cdc-streamlit` | us-central1 | Streamlit dashboard |
+| Dataproc Cluster | `cdc-processing-cluster` | us-central1 | PySpark data processing |
+| BigQuery Dataset | `cdc_health_data` | US | Analytics dataset |
+| BigQuery Table | `cdc_hospital_admissions` | US | Processed data table |
+| Composer Environment | `cdc-health-composer` | us-central1 | Airflow orchestration |
 
+### Required IAM Permissions
+
+**Dataproc Service Account**:
+- `roles/storage.objectViewer` (read from GCS)
+- `roles/storage.objectAdmin` (write to GCS)
+- `roles/bigquery.dataEditor` (write to BigQuery)
+
+**Composer Service Account**:
+- `roles/dataproc.jobRunner` (submit Dataproc jobs)
+- `roles/storage.objectViewer` (read GCS)
+- `roles/run.invoker` (invoke Cloud Run jobs)
+
+**Cloud Run Service Account** (Streamlit):
+- `roles/bigquery.dataViewer` (read from BigQuery)
+
+**Cloud Run Job Service Account** (Ingestion):
+- `roles/storage.objectAdmin` (write to GCS)
+
+---
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+**1. Cloud Run Job Fails**
+- **Issue**: Job execution fails with timeout or API error
+- **Solution**: Check CDC API availability, increase timeout, verify GCS permissions
+
+**2. Dataproc Job Fails**
+- **Issue**: "File not found" or "ClassNotFoundException"
+- **Solution**: Verify PySpark script is uploaded to GCS, include BigQuery connector JAR
+
+**3. BigQuery Write Errors**
+- **Issue**: Schema mismatch or permission errors
+- **Solution**: Verify table schema matches DataFrame, check service account permissions
+
+**4. Streamlit Dashboard Shows No Data**
+- **Issue**: Dashboard loads but shows empty charts
+- **Solution**: Verify BigQuery query uses correct project/dataset, check service account has BigQuery read permissions
+
+**5. DAG Tasks Fail**
+- **Issue**: Tasks fail in Airflow
+- **Solution**: Check task logs, verify resource names match, ensure dependencies are correct
+
+**6. Scheduled DAG Not Running**
+- **Issue**: DAG doesn't trigger on schedule
+- **Solution**: Verify DAG is enabled, check schedule_interval syntax, confirm Composer environment is running
+
+---
+
+## Project Structure
+
+```
+datapipeline-gcp/
+├── Readme.md                    # This file
+├── cdc-ingestion/               # Step 1: Cloud Run Ingestion
+│   ├── main.py                  # Ingestion logic
+│   ├── Dockerfile               # Container definition
+│   └── requirements.txt         # Python dependencies
+├── cdc-dataproc/                # Step 4: Dataproc Processing
+│   └── main.py                  # PySpark ETL script
+├── cdc-streamlit/               # Step 5: Streamlit Dashboard
+│   ├── main.py                  # Dashboard application
+│   ├── Dockerfile               # Container definition
+│   └── requirements.txt         # Python dependencies
+└── cdc-composer/                # Step 6: Airflow DAG
+    └── cdc-dag.py               # Orchestration DAG
+```
+
+---
+
+## Summary
+
+This pipeline successfully implements a complete data engineering workflow on GCP:
+
+1. ✅ **Ingestion**: Cloud Run Job fetches CDC data and stores in GCS
+2. ✅ **Processing**: Dataproc PySpark job cleans and transforms data
+3. ✅ **Storage**: BigQuery stores analytics-ready data
+4. ✅ **Visualization**: Streamlit dashboard provides interactive insights
+5. ✅ **Orchestration**: Cloud Composer DAG automates the entire pipeline
+
+The pipeline is production-ready with error handling, logging, and scheduled execution. All components have been tested and validated end-to-end.
+
+---
+
+**For questions or issues, refer to the detailed code comments in each component or check the GCP service logs for debugging.**
