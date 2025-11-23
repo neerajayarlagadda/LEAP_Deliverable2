@@ -66,7 +66,7 @@ This README documents the implementation flow that was followed:
          │    ▼
          │    ┌─────────────────────────────┐
          │    │  Cloud Run Job              │
-         │    │  (cdc-ingest-job)           │
+         │    │  (cdc-ingestion-job)        │
          │    │  - Fetches CDC API data     │
          │    │  - Uploads to GCS           │
          │    └──────────┬──────────────────┘
@@ -77,15 +77,27 @@ This README documents the implementation flow that was followed:
          │    │  gs://.../raw/*.json        │
          │    └──────────┬──────────────────┘
          │               │
-         └─── Task 2: Dataproc Job (Processing)
+         └─── Task 2: Create Dataproc Cluster (On-Demand)
               │
               ▼
          ┌─────────────────────────────┐
          │  Dataproc Cluster           │
-         │  (cdc-processing-cluster)   │
-         │  - PySpark ETL processing   │
-         │  - Data cleaning & transform│
+         │  (cdc-processing-cluster-  │
+         │   temp) - Created on-demand │
          └──────────┬──────────────────┘
+                    │
+                    ▼
+         ┌─────────────────────────────┐
+         │  Task 3: Run PySpark Job    │
+         │  - Data cleaning & transform│
+         │  - Load to BigQuery         │
+         └──────────┬──────────────────┘
+                    │
+                    ▼
+         ┌─────────────────────────────┐
+         │  Task 4: Delete Cluster    │
+         │  (Always, even on failure) │
+         └────────────────────────────┘
                     │
                     ├───► GCS Processed (Parquet)
                     │     gs://.../processed/cdc_clean/
@@ -232,6 +244,8 @@ FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
 
 **Objective**: Set up Dataproc cluster, process raw data, and verify data appears in BigQuery.
 
+**Note**: For initial testing, a persistent cluster can be created. However, the production DAG uses **on-demand clusters** that are created and deleted automatically for cost optimization.
+
 **Implementation Details**:
 
 1. **Create GCS Buckets** (if not exists):
@@ -248,7 +262,7 @@ gsutil mb -l US gs://cdc-dataproc-staging
 gsutil cp cdc-dataproc/main.py gs://cdc-health-ingestion-bucket/data-proc/main.py
 ```
 
-3. **Create Dataproc Cluster**:
+3. **Create Dataproc Cluster** (for initial testing):
 ```powershell
 gcloud dataproc clusters create cdc-processing-cluster `
   --region=us-central1 `
@@ -258,13 +272,15 @@ gcloud dataproc clusters create cdc-processing-cluster `
   --image-version=2.1-debian11
 ```
 
-4. **Submit PySpark Job**:
+4. **Submit PySpark Job** (for testing):
 ```powershell
 gcloud dataproc jobs submit pyspark gs://cdc-health-ingestion-bucket/data-proc/main.py `
   --cluster=cdc-processing-cluster `
   --region=us-central1 `
   --jars=gs://spark-lib/bigquery/spark-bigquery-latest.jar
 ```
+
+**Note**: In the production DAG (Step 6), clusters are created on-demand and automatically deleted after job completion to minimize costs.
 
 **What the PySpark Job Does** (`cdc-dataproc/main.py`):
 - Reads raw JSON files from GCS using `multiLine=True` (handles JSON arrays)
@@ -403,13 +419,20 @@ gsutil cp cdc-composer/cdc-dag.py gs://<COMPOSER_BUCKET>/dags/cdc-dag.py
 
 - **DAG ID**: `cdc_refresh_pipeline`
 - **Schedule**: Every 12 hours (`0 */12 * * *`)
-- **Task 1**: `run_cdc_ingestion` (BashOperator)
-  - Executes Cloud Run Job `cdc-ingest-job`
+- **Task 1**: `trigger_ingestion_job` (CloudRunExecuteJobOperator)
+  - Executes Cloud Run Job `cdc-ingestion-job`
   - Fetches CDC API data and uploads to GCS
-- **Task 2**: `run_cdc_dataproc_job` (DataprocSubmitJobOperator)
-  - Submits PySpark job to Dataproc cluster
+- **Task 2**: `create_cluster` (DataprocCreateClusterOperator)
+  - Creates Dataproc cluster on-demand (`cdc-processing-cluster-temp`)
+  - Configures 1 master + 2 worker nodes (n1-standard-2)
+  - Includes Anaconda and Jupyter components
+- **Task 3**: `run_dataproc_job` (DataprocSubmitJobOperator)
+  - Submits PySpark job to the created cluster
   - Processes raw data and loads into BigQuery
-- **Dependencies**: Task 1 → Task 2 (sequential execution)
+- **Task 4**: `delete_cluster` (DataprocDeleteClusterOperator)
+  - Deletes cluster after job completion
+  - Uses `TriggerRule.ALL_DONE` to ensure cleanup even if job fails
+- **Dependencies**: Task 1 → Task 2 → Task 3 → Task 4 (sequential execution)
 
 **Testing Steps**:
 
@@ -435,14 +458,18 @@ gsutil cp cdc-composer/cdc-dag.py gs://<COMPOSER_BUCKET>/dags/cdc-dag.py
 3. **Monitor DAG Execution**:
    - Watch task execution in Airflow UI
    - Check task logs for each step
-   - Verify task dependencies (Task 1 completes before Task 2)
+   - Verify task dependencies (sequential execution: Ingestion → Create Cluster → Run Job → Delete Cluster)
 
 4. **End-to-End Validation**:
    - ✅ Task 1 (Ingestion) completes successfully
    - ✅ New JSON file appears in GCS raw bucket
-   - ✅ Task 2 (Dataproc) starts after Task 1
+   - ✅ Task 2 (Create Cluster) starts after Task 1
+   - ✅ Dataproc cluster is created successfully
+   - ✅ Task 3 (Run Job) executes PySpark processing
    - ✅ Dataproc job completes successfully
    - ✅ BigQuery table is updated with new data
+   - ✅ Task 4 (Delete Cluster) cleans up resources
+   - ✅ Cluster is deleted (even if job fails)
    - ✅ Streamlit dashboard shows updated data
 
 5. **Verify Scheduled Runs**:
@@ -453,8 +480,9 @@ gsutil cp cdc-composer/cdc-dag.py gs://<COMPOSER_BUCKET>/dags/cdc-dag.py
 **Expected Results**:
 - ✅ DAG appears in Airflow UI
 - ✅ Manual trigger executes successfully
-- ✅ Both tasks complete without errors
+- ✅ All four tasks complete without errors
 - ✅ Data flows: CDC API → GCS → Dataproc → BigQuery
+- ✅ Cluster is created and deleted automatically (cost-optimized)
 - ✅ Scheduled runs execute automatically
 - ✅ Complete pipeline works end-to-end
 
@@ -469,7 +497,7 @@ gsutil cp cdc-composer/cdc-dag.py gs://<COMPOSER_BUCKET>/dags/cdc-dag.py
 - [ ] **Dataproc Processing**: PySpark job processes data correctly
 - [ ] **BigQuery**: Table contains cleaned, properly typed data
 - [ ] **Streamlit**: Dashboard displays data and visualizations work
-- [ ] **DAG Orchestration**: Both tasks execute in correct order
+- [ ] **DAG Orchestration**: All four tasks execute in correct order (Ingestion → Create Cluster → Run Job → Delete Cluster)
 - [ ] **Scheduled Runs**: DAG runs automatically on schedule
 - [ ] **Error Handling**: Pipeline handles failures gracefully
 
@@ -511,7 +539,7 @@ FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
 | GCS Bucket | `cdc-dataproc-staging` | US | Dataproc staging and temp files |
 | Cloud Run Job | `cdc-ingest-job` | us-central1 | Data ingestion service |
 | Cloud Run Service | `cdc-streamlit` | us-central1 | Streamlit dashboard |
-| Dataproc Cluster | `cdc-processing-cluster` | us-central1 | PySpark data processing |
+| Dataproc Cluster | `cdc-processing-cluster-temp` | us-central1 | On-demand PySpark processing (created/deleted by DAG) |
 | BigQuery Dataset | `cdc_health_data` | US | Analytics dataset |
 | BigQuery Table | `cdc_hospital_admissions` | US | Processed data table |
 | Composer Environment | `cdc-health-composer` | us-central1 | Airflow orchestration |
@@ -524,7 +552,7 @@ FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
 - `roles/bigquery.dataEditor` (write to BigQuery)
 
 **Composer Service Account**:
-- `roles/dataproc.jobRunner` (submit Dataproc jobs)
+- `roles/dataproc.admin` (create, delete clusters and submit jobs)
 - `roles/storage.objectViewer` (read GCS)
 - `roles/run.invoker` (invoke Cloud Run jobs)
 
@@ -557,8 +585,8 @@ FROM `neeraja-data-pipeline.cdc_health_data.cdc_hospital_admissions`;
 - **Solution**: Verify BigQuery query uses correct project/dataset, check service account has BigQuery read permissions
 
 **5. DAG Tasks Fail**
-- **Issue**: Tasks fail in Airflow
-- **Solution**: Check task logs, verify resource names match, ensure dependencies are correct
+- **Issue**: Tasks fail in Airflow (especially cluster creation/deletion)
+- **Solution**: Check task logs, verify resource names match, ensure dependencies are correct, verify Composer service account has `roles/dataproc.admin` permission
 
 **6. Scheduled DAG Not Running**
 - **Issue**: DAG doesn't trigger on schedule
@@ -592,12 +620,12 @@ datapipeline-gcp/
 This pipeline successfully implements a complete data engineering workflow on GCP:
 
 1. ✅ **Ingestion**: Cloud Run Job fetches CDC data and stores in GCS
-2. ✅ **Processing**: Dataproc PySpark job cleans and transforms data
+2. ✅ **Processing**: Dataproc PySpark job cleans and transforms data (using on-demand clusters for cost optimization)
 3. ✅ **Storage**: BigQuery stores analytics-ready data
 4. ✅ **Visualization**: Streamlit dashboard provides interactive insights
-5. ✅ **Orchestration**: Cloud Composer DAG automates the entire pipeline
+5. ✅ **Orchestration**: Cloud Composer DAG automates the entire pipeline with automatic cluster lifecycle management
 
-The pipeline is production-ready with error handling, logging, and scheduled execution. All components have been tested and validated end-to-end.
+The pipeline is production-ready with error handling, logging, scheduled execution, and cost-optimized resource management. All components have been tested and validated end-to-end.
 
 ---
 
